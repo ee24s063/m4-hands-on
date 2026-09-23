@@ -14,5 +14,8 @@ test passes.
 
 Session 4A: use your AI chat panel to diagnose and fix the bug.
 Session 4B: refactor the loyalty-tier block into a private helper
-so the top-level method's complexity drops. PMD/SpotBugs are not
-wired in here (they show up in Modules 5/8) -- just javac + JUnit.
+so the top-level method's complexity drops. PMD is not wired in
+here (it shows up in Modules 5/8).
+
+Static analysis: `make spotbugs` downloads SpotBugs into `libs/`
+and analyses the `src/` classes; any finding fails the build.
