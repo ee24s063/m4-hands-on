@@ -54,7 +54,7 @@ public class PriceEngine {
         //    tier 3 (5+ years):  10% off
         int years = customer.loyaltyYears();
         double loyaltyRate;
-        if (years > 5) {
+        if (years >= 5) {
             loyaltyRate = 0.10;
         } else if (years >= 3) {
             loyaltyRate = 0.05;
