@@ -221,13 +221,11 @@ Applied, ran `make test` - all 10 still pass.
 Commit message: `refactor: extract applyLoyaltyDiscount from quote`
 Why: pulls the loyalty ladder out so quote reads as a list of steps instead of one long block, and the ladder can be read (and tested) on its own.
 
-## Part C - Static analysis (SpotBugs)
+## (Optional) Part C - Fix a SpotBugs finding with AI
 
 SpotBugs wasn't in the starter Makefile, so the AI added a `make spotbugs` target. It downloads SpotBugs 4.9.3 into `libs/` (already gitignored), builds, and runs it on the `src/` classes only (`-onlyAnalyze Customer,Money,Order,PriceEngine`, JUnit on the aux classpath so the test classes resolve). `-effort:max -low` so nothing gets filtered out, and `-exitcode` so any finding fails the build.
 
-Prompt: no separate prompt for this. At the end of the previous step the AI had said SpotBugs would be the next commit on `m4-hands-on`, and I just told it to start. It wired SpotBugs in, ran it, explained the findings and applied the fix itself, and I reviewed the diff and the results afterwards.
-
-Findings (raw SpotBugs output, on the code after the 4B refactor):
+`make spotbugs` report (on the code after the 4B refactor), two findings as the handout said:
 
 ```
 M V EI2: new Order(long, List, boolean, String) may expose internal representation by storing an externally mutable object into lines  At Order.java:[line 4]
@@ -236,11 +234,71 @@ M V EI: Order.lines() may expose internal representation by returning lines  At 
 
 Nothing in `PriceEngine`, `Money` or `Customer`. The refactor didn't add or remove any findings.
 
-**Rule's explanation (EI_EXPOSE_REP / EI_EXPOSE_REP2):** SpotBugs treats this as a generic "malicious code vulnerability" pattern. Storing a caller's mutable object in a field, or returning a field that points to one, lets outside code change the object's internal state without going through it. The rule suggests returning or storing a copy instead.
+Picked **EI_EXPOSE_REP2** (the constructor finding). Prompt, with the flagged code (the original `Order.java`) pasted underneath:
 
-**AI's explanation:** more specific to this code. `Order` is a record, and records don't copy their components. So the `List<Line>` handed to `new Order(...)` is the same list `order.lines()` returns later, and anyone holding it can add or remove lines after the order is built, e.g. between two `quote()` calls on the same order. It also noticed that `PriceEngine.quote` checks `order.lines() == null`, so a plain `List.copyOf(lines)` would change behaviour: `List.copyOf(null)` throws NPE, and the null order would never reach quote's own `IllegalArgumentException`.
+```
+SpotBugs reports the finding EI_EXPOSE_REP2 on the following
+code. Explain what the rule requires and show the smallest
+patch that satisfies it without changing behaviour.
+Show the diff.
+```
 
-Fix, a compact constructor in `Order.java`:
+```java
+import java.util.List;
+
+/** A pending order awaiting a quote. */
+public record Order(long id, List<Line> lines, boolean expedited,
+                    String promoCode) {
+
+    public record Line(String sku, int qty, Money unit) {}
+}
+```
+
+Note: I asked this in the same Claude Code session that had already wired in SpotBugs and applied the fix, so the AI had that context when it answered.
+
+AI's reply (verbatim):
+
+> **What EI_EXPOSE_REP2 requires**
+>
+> EI_EXPOSE_REP2 ("may expose internal representation by storing an externally mutable object") fires when a constructor or method stores a caller-supplied mutable object directly in a field. The caller still holds a reference to the same object, so they can change your object's internal state later without going through its API. To satisfy the rule, the class has to keep its **own copy** of the mutable argument instead of the caller's reference.
+>
+> In `Order`, the record's generated constructor does `this.lines = lines`. Whoever builds an `Order` with an `ArrayList` can add, remove or replace lines after the order exists, for example between two `quote()` calls. The same stored reference is what `lines()` returns, which is why SpotBugs also reports the companion finding EI_EXPOSE_REP on the accessor.
+>
+> **Smallest patch**
+>
+> Add a compact constructor that replaces the argument with an unmodifiable copy before the record assigns it:
+>
+> ```diff
+> --- a/src/Order.java
+> +++ b/src/Order.java
+> @@ -3,6 +3,11 @@ import java.util.List;
+>  /** A pending order awaiting a quote. */
+>  public record Order(long id, List<Line> lines, boolean expedited,
+>                      String promoCode) {
+>
+> +    /** Defensive copy so callers can't mutate the order after it's built. */
+> +    public Order {
+> +        lines = lines == null ? null : List.copyOf(lines);
+> +    }
+> +
+>      public record Line(String sku, int qty, Money unit) {}
+>  }
+> ```
+>
+> **Why this doesn't change behaviour**
+>
+> - **The null check is kept on purpose.** `List.copyOf(null)` throws `NullPointerException`. `PriceEngine.quote` currently accepts an `Order` with `null` lines and rejects it with its own `IllegalArgumentException`. A plain `List.copyOf(lines)` would move that failure into the `Order` constructor and change the exception type, so the `null` case passes through unchanged.
+> - **Contents and order are the same.** `List.copyOf` keeps the element order and the same `Line` objects. `Line` is itself an immutable record, so a shallow copy is enough.
+> - **The accessor is covered too.** The copy is unmodifiable, so `lines()` can return it directly. That also clears EI_EXPOSE_REP with no change to the accessor.
+> - **One edge case.** `List.copyOf` rejects `null` *elements*. No existing caller or test passes a list containing `null`, and `quote` would already fail on such a line (`l.qty()` on `null`), so the observable behaviour for valid orders is unchanged.
+>
+> After applying it, re-run `make spotbugs`: both EI findings on `Order` go away. Then run `make test`: all 10 tests should still pass.
+
+My note: read the diff before applying. The null check is the part I wouldn't have thought of: SpotBugs' own rule text only says "store a copy", and a plain `List.copyOf(lines)` would have silently changed which exception a null-lines order throws.
+
+**Rule's explanation (EI_EXPOSE_REP / EI_EXPOSE_REP2)**, from the SpotBugs bug description: it's a generic "malicious code vulnerability" pattern. Storing a caller's mutable object in a field, or returning a field that points to one, lets outside code change the object's internal state without going through it. The rule suggests storing or returning a copy instead.
+
+Fix applied, a compact constructor in `Order.java`:
 
 ```java
 /** Defensive copy so callers can't mutate the order after it's built. */
@@ -264,7 +322,7 @@ Why: the record stored and returned the caller's mutable List, so an order's lin
 
 **How much did complexity drop?** quote went from **21 to 17**, so 4 lower. The loyalty ladder (3) plus the `loyaltyRate > 0` guard (1) moved out. The new helper `applyLoyaltyDiscount` is CC 5 on its own. Doing the same with the promo block and the tax block would get quote close to single digits.
 
-**SpotBugs rule vs AI explanation:** the rule's text is correct but generic. It says "may expose internal representation" and talks about untrusted code, which doesn't sound like much of a risk in a small pricing engine. The AI's explanation was more useful because it tied the finding to this code: records don't copy their fields, so an order's lines can change after it's built. It also caught the edge case the rule knows nothing about, that a plain `List.copyOf` would break the existing null check in `quote`. The rule told me *what* pattern it matched, the AI told me *why it matters here* and what the safe fix was. I still double-checked the fix against the rule, since both findings had to go away, and against the tests, since behaviour had to stay the same.
+**Did the SpotBugs fix need me to understand the rule, or was the AI's explanation enough?** The AI's explanation was enough to proceed, but only because I checked it against the rule afterwards. The rule's text is correct but generic. It says "may expose internal representation" and talks about untrusted code, which doesn't sound like much of a risk in a small pricing engine. The AI's explanation was more useful because it tied the finding to this code: records don't copy their fields, so an order's lines can change after it's built. It also caught the edge case the rule knows nothing about, that a plain `List.copyOf` would break the existing null check in `quote`. The rule told me *what* pattern it matched, the AI told me *why it matters here* and what the safe fix was. I still double-checked the fix against the rule, since both findings had to go away, and against the tests, since behaviour had to stay the same.
 
 **Refactor I rejected:** turning the tax ladder (EU/US/IN/else) into a `Map<String, Double>` lookup. The AI suggested it to get the if/else-if chain down to one line. I didn't take it because the four tax rates won't change often, and swapping a readable ladder for a static map plus `getOrDefault` doesn't make the intent any clearer, it just moves the same four numbers somewhere else. It would also make it harder later if a rate ever depends on more than just the region string. Extract-method was worth it because it splits up unrelated jobs, the map idea was more about fewer lines than actually less complexity, so I kept the if/else-if.
 
