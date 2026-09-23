@@ -49,23 +49,7 @@ public class PriceEngine {
         }
 
         // 4. Loyalty-tier discount
-        //    tier 1 (1-2 years):  2% off
-        //    tier 2 (3-4 years):  5% off
-        //    tier 3 (5+ years):  10% off
-        int years = customer.loyaltyYears();
-        double loyaltyRate;
-        if (years >= 5) {
-            loyaltyRate = 0.10;
-        } else if (years >= 3) {
-            loyaltyRate = 0.05;
-        } else if (years >= 1) {
-            loyaltyRate = 0.02;
-        } else {
-            loyaltyRate = 0.0;
-        }
-        if (loyaltyRate > 0.0) {
-            running = running.subtract(subtotal.times(loyaltyRate));
-        }
+        running = applyLoyaltyDiscount(running, subtotal, customer.loyaltyYears());
 
         // 5. Regional tax
         double taxRate;
@@ -83,6 +67,28 @@ public class PriceEngine {
             running = running.add(running.times(taxRate));
         }
 
+        return running;
+    }
+
+    /**
+     * tier 1 (1-2 years):  2% off
+     * tier 2 (3-4 years):  5% off
+     * tier 3 (5+ years):  10% off
+     */
+    private static Money applyLoyaltyDiscount(Money running, Money subtotal, int loyaltyYears) {
+        double loyaltyRate;
+        if (loyaltyYears >= 5) {
+            loyaltyRate = 0.10;
+        } else if (loyaltyYears >= 3) {
+            loyaltyRate = 0.05;
+        } else if (loyaltyYears >= 1) {
+            loyaltyRate = 0.02;
+        } else {
+            loyaltyRate = 0.0;
+        }
+        if (loyaltyRate > 0.0) {
+            return running.subtract(subtotal.times(loyaltyRate));
+        }
         return running;
     }
 }
