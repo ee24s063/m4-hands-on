@@ -94,7 +94,7 @@ The explain step was more useful than I expected, it pointed straight at line 57
 
 ## Setup
 
-Didn't set up PMD/SpotBugs for this run (the Makefile only has JUnit, the plugins are still a TODO), so I counted complexity by hand and couldn't compare it against PMD's number. Rule I used: start at 1, +1 for every if / else-if / for / case, +1 for every && or ||.
+PMD isn't wired into the Makefile (only JUnit, and later SpotBugs in Part C), so I counted complexity by hand and couldn't compare it against PMD's number. SpotBugs doesn't report cyclomatic complexity, so it couldn't be used for this count either. Rule I used: start at 1, +1 for every if / else-if / for / case, +1 for every && or ||.
 
 `quote(Order, Customer)`:
 
@@ -221,10 +221,53 @@ Applied, ran `make test` - all 10 still pass.
 Commit message: `refactor: extract applyLoyaltyDiscount from quote`
 Why: pulls the loyalty ladder out so quote reads as a list of steps instead of one long block, and the ladder can be read (and tested) on its own.
 
+## Part C - Static analysis (SpotBugs)
+
+SpotBugs wasn't in the starter Makefile, so the AI added a `make spotbugs` target. It downloads SpotBugs 4.9.3 into `libs/` (already gitignored), builds, and runs it on the `src/` classes only (`-onlyAnalyze Customer,Money,Order,PriceEngine`, JUnit on the aux classpath so the test classes resolve). `-effort:max -low` so nothing gets filtered out, and `-exitcode` so any finding fails the build.
+
+Prompt: no separate prompt for this. At the end of the previous step the AI had said SpotBugs would be the next commit on `m4-hands-on`, and I just told it to start. It wired SpotBugs in, ran it, explained the findings and applied the fix itself, and I reviewed the diff and the results afterwards.
+
+Findings (raw SpotBugs output, on the code after the 4B refactor):
+
+```
+M V EI2: new Order(long, List, boolean, String) may expose internal representation by storing an externally mutable object into lines  At Order.java:[line 4]
+M V EI: Order.lines() may expose internal representation by returning lines  At Order.java:[line 4]
+```
+
+Nothing in `PriceEngine`, `Money` or `Customer`. The refactor didn't add or remove any findings.
+
+**Rule's explanation (EI_EXPOSE_REP / EI_EXPOSE_REP2):** SpotBugs treats this as a generic "malicious code vulnerability" pattern. Storing a caller's mutable object in a field, or returning a field that points to one, lets outside code change the object's internal state without going through it. The rule suggests returning or storing a copy instead.
+
+**AI's explanation:** more specific to this code. `Order` is a record, and records don't copy their components. So the `List<Line>` handed to `new Order(...)` is the same list `order.lines()` returns later, and anyone holding it can add or remove lines after the order is built, e.g. between two `quote()` calls on the same order. It also noticed that `PriceEngine.quote` checks `order.lines() == null`, so a plain `List.copyOf(lines)` would change behaviour: `List.copyOf(null)` throws NPE, and the null order would never reach quote's own `IllegalArgumentException`.
+
+Fix, a compact constructor in `Order.java`:
+
+```java
+/** Defensive copy so callers can't mutate the order after it's built. */
+public Order {
+    lines = lines == null ? null : List.copyOf(lines);
+}
+```
+
+`List.copyOf` returns an immutable list, so this fixes both findings: the stored list isn't the caller's, and the returned list can't be modified.
+
+Checked it:
+
+- `make spotbugs`: 0 findings, exit 0.
+- `make test`: all 10 still pass.
+- Temporarily reverted `Order.java` and ran `make spotbugs` again: both findings came back and make failed (`Error 1`). So the target really does fail on a finding.
+
+Commit message: `fix: defensive copy of Order.lines to clear SpotBugs EI_EXPOSE_REP`
+Why: the record stored and returned the caller's mutable List, so an order's lines could change after it was quoted. An immutable copy fixes that without changing how null lines are rejected.
+
 ## Part D - Reflect
 
 **How much did complexity drop?** quote went from **21 to 17**, so 4 lower. The loyalty ladder (3) plus the `loyaltyRate > 0` guard (1) moved out. The new helper `applyLoyaltyDiscount` is CC 5 on its own. Doing the same with the promo block and the tax block would get quote close to single digits.
 
-**SpotBugs:** didn't do this part (plugin isn't in the Makefile yet), so nothing to say about rule vs AI explanation.
+**SpotBugs rule vs AI explanation:** the rule's text is correct but generic. It says "may expose internal representation" and talks about untrusted code, which doesn't sound like much of a risk in a small pricing engine. The AI's explanation was more useful because it tied the finding to this code: records don't copy their fields, so an order's lines can change after it's built. It also caught the edge case the rule knows nothing about, that a plain `List.copyOf` would break the existing null check in `quote`. The rule told me *what* pattern it matched, the AI told me *why it matters here* and what the safe fix was. I still double-checked the fix against the rule, since both findings had to go away, and against the tests, since behaviour had to stay the same.
 
 **Refactor I rejected:** turning the tax ladder (EU/US/IN/else) into a `Map<String, Double>` lookup. The AI suggested it to get the if/else-if chain down to one line. I didn't take it because the four tax rates won't change often, and swapping a readable ladder for a static map plus `getOrDefault` doesn't make the intent any clearer, it just moves the same four numbers somewhere else. It would also make it harder later if a rate ever depends on more than just the region string. Extract-method was worth it because it splits up unrelated jobs, the map idea was more about fewer lines than actually less complexity, so I kept the if/else-if.
+
+
+
+
